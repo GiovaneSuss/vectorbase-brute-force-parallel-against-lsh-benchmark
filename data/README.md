@@ -1,8 +1,9 @@
 # data/
 
-Diretório para os arquivos brutos do dataset (SIFT1M, ou subconjuntos SIFT100K/SIFT10K): `*.fvecs` (base e
-queries) e `*.ivecs` (ground truth).
+Arquivos do dataset — nada aqui é versionado no git (ver `.gitignore`), só este README.
 
-Esses arquivos não são versionados no git (ver `.gitignore`) por serem grandes binários baixados do
-ann-benchmarks — apenas este README fica no repositório para documentar onde eles devem ser colocados antes
-de rodar `make populate`.
+- `sift/`, `siftsmall/` — arquivos brutos do corpus TEXMEX (SIFT1M e SIFT10K), baixados por `make download`:
+  `*_base.fvecs` (base), `*_query.fvecs` (queries), `*_groundtruth.ivecs` (100 vizinhos corretos por query).
+  Os `*_learn.fvecs` vêm junto no pacote mas não são usados.
+- `sift1m.db`, `siftsmall.db` — o banco já convertido e validado, gerado por `make construct-db`
+  (`DATASET=siftsmall` para o menor). É esse arquivo que o `make up-db` sobe para a memória.
