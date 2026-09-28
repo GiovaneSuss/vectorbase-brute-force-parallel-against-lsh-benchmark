@@ -11,12 +11,10 @@ Já implementado:
 - `shm_db.{h,cpp}` — `attach_db(dataset)` / `detach_db()`: API que as buscas usam para se plugar no banco no
   ar, com mapeamento somente leitura e ponteiros `const`.
 
-Previsto:
-
-- Função de distância euclidiana entre dois vetores.
-- Utilitários de top-K (heap / ordenação parcial) usados no merge dos resultados locais de cada thread.
-- Medição de tempo/energia e escrita das métricas (tempo, speedup, eficiência paralela, recall) em CSV,
-  conforme protocolo experimental da Etapa 6 da especificação técnica.
+- `distance.h` — `l2_sq`: distância euclidiana ao quadrado (vetorizada com `omp simd`).
+- `topk.h` — `Neighbor`, `TopK` (max-heap limitada a k) e `merge_topk` (reduz os top-K locais no global).
+- `recall.h` — `compute_recall`: recall@k estrito e considerando empates de distância.
+- `metrics.{h,cpp}` — relógio, CPU por processo/thread, energia via RAPL, data-hora e escrita de CSV.
 
 Estruturas específicas de um único algoritmo (ex.: `Bucket`, `LSHIndex` do LSH) não entram aqui — ficam em
 `scripts/lsh/`.

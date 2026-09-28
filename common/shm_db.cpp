@@ -30,7 +30,9 @@ DbView attach_db(const std::string& dataset) {
         throw std::runtime_error("banco '" + dataset + "' ainda esta sendo carregado — tente de novo em instantes");
     }
 
-    void* p = mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    // MAP_POPULATE ja monta as tabelas de pagina de todo o segmento aqui, para que os page faults do primeiro
+    // acesso nao caiam dentro do tempo medido das buscas.
+    void* p = mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED | MAP_POPULATE, fd, 0);
     int e = errno;
     close(fd); // o mapeamento continua valido sem o fd
     if (p == MAP_FAILED) throw std::runtime_error("mmap(" + name + "): " + std::strerror(e));

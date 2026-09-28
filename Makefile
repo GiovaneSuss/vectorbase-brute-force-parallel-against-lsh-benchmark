@@ -6,6 +6,16 @@ LDFLAGS := -lrt
 THREADS ?= 4
 # Dataset do banco: sift1m (padrao) ou siftsmall (10K vetores, para testes rapidos)
 DATASET ?= sift1m
+# Parametros dos experimentos de busca
+QUERIES ?= 100
+K ?= 10
+REPEATS ?= 3
+THREAD_LIST ?= 1 2 4 8
+
+# Fixa cada thread OpenMP num nucleo (threads vizinhas em nucleos vizinhos): sem isso o SO migra as
+# threads entre nucleos no meio da medicao e o tempo fica ruidoso.
+export OMP_PROC_BIND ?= close
+export OMP_PLACES ?= cores
 
 DATA_DIR := data
 COMMON_DIR := common
@@ -18,9 +28,16 @@ PCD_DB := $(BIN_DIR)/pcd_db
 DB_SRCS := $(DATABASE_DIR)/pcd_db.cpp $(DATABASE_DIR)/fvecs_reader.cpp $(COMMON_DIR)/shm_db.cpp
 DB_HDRS := $(wildcard $(DATABASE_DIR)/*.h $(COMMON_DIR)/*.h)
 
-.PHONY: all database download construct-db up-db down-db status-db test-db brute-force lsh clean
+BF_BIN := $(BIN_DIR)/brute_force
+BF_DIR := $(SCRIPTS_DIR)/brute-force
+BF_SRCS := $(BF_DIR)/main.cpp $(BF_DIR)/brute_force.cpp $(COMMON_DIR)/shm_db.cpp $(COMMON_DIR)/metrics.cpp
+BF_HDRS := $(wildcard $(BF_DIR)/*.h $(COMMON_DIR)/*.h)
+BF_ARGS := --dataset $(DATASET) --queries $(QUERIES) --k $(K) --repeats $(REPEATS) --out $(RESULTS_DIR)/brute-force
 
-all: database
+.PHONY: all database download construct-db up-db down-db status-db test-db brute-force brute-force-seq \
+        bench-brute-force lsh clean
+
+all: database $(BF_BIN)
 
 # Compila a ferramenta do banco (parser .fvecs/.ivecs + construcao + memoria compartilhada)
 database: $(PCD_DB)
@@ -53,9 +70,21 @@ status-db: database
 test-db: database
 	@$(PCD_DB) test-readonly $(DATASET)
 
-# Compila e roda a busca brute-force (sequencial e paralela) com THREADS threads
-brute-force:
-	@echo "TODO: compilar e rodar $(SCRIPTS_DIR)/brute-force com OMP_NUM_THREADS=$(THREADS) sobre o banco $(DATASET)"
+$(BF_BIN): $(BF_SRCS) $(BF_HDRS)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(COMMON_DIR) -I$(BF_DIR) -o $@ $(BF_SRCS) $(LDFLAGS)
+
+# Busca brute-force paralela com THREADS threads (precisa do banco no ar: make up-db)
+brute-force: $(BF_BIN)
+	@$(BF_BIN) --threads $(THREADS) $(BF_ARGS)
+
+# Busca brute-force sequencial (sem OpenMP) — baseline do speedup
+brute-force-seq: $(BF_BIN)
+	@$(BF_BIN) --seq $(BF_ARGS)
+
+# Roda o sequencial e depois o paralelo para cada valor de THREAD_LIST, com speedup e eficiencia
+bench-brute-force: $(BF_BIN)
+	@$(BF_DIR)/bench.sh "$(BF_BIN)" "$(THREAD_LIST)" $(BF_ARGS)
 
 # Compila e roda a indexacao + busca LSH com THREADS threads
 lsh:
