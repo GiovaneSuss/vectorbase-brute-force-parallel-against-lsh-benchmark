@@ -11,3 +11,5 @@ bin/
 build/
 *.o
 *.out
+
+CLAUDE.md
