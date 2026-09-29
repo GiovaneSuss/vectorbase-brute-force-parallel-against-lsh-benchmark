@@ -4,7 +4,8 @@ LDFLAGS := -lrt
 
 # Numero de threads usado nas buscas (make brute-force THREADS=8)
 THREADS ?= 4
-# Dataset do banco: sift1m (padrao) ou siftsmall (10K vetores, para testes rapidos)
+# Dataset do banco: sift1m (padrao), sift10m (10M primeiros do SIFT1B) ou siftsmall (10K, testes rapidos).
+# Atalhos sem precisar de DATASET=: make up-db-1m, make up-db-10m, make up-db-small (idem construct/down/status/test)
 DATASET ?= sift1m
 # Parametros dos experimentos de busca
 QUERIES ?= 100
@@ -32,10 +33,12 @@ BF_BIN := $(BIN_DIR)/brute_force
 BF_DIR := $(SCRIPTS_DIR)/brute-force
 BF_SRCS := $(BF_DIR)/main.cpp $(BF_DIR)/brute_force.cpp $(COMMON_DIR)/shm_db.cpp $(COMMON_DIR)/metrics.cpp
 BF_HDRS := $(wildcard $(BF_DIR)/*.h $(COMMON_DIR)/*.h)
-BF_ARGS := --dataset $(DATASET) --queries $(QUERIES) --k $(K) --repeats $(REPEATS) --out $(RESULTS_DIR)/brute-force
+# Nas buscas, sem DATASET= explicito o programa usa o banco que estiver no ar (auto); com DATASET= usa esse.
+SEARCH_DATASET := $(if $(filter command line environment,$(origin DATASET)),$(DATASET),auto)
+BF_ARGS := --dataset $(SEARCH_DATASET) --queries $(QUERIES) --k $(K) --repeats $(REPEATS) --out $(RESULTS_DIR)/brute-force
 
-.PHONY: all database download construct-db up-db down-db status-db test-db brute-force brute-force-seq \
-        bench-brute-force lsh clean
+.PHONY: all database download download-10m construct-db up-db down-db status-db test-db brute-force \
+        brute-force-seq bench-brute-force lsh clean
 
 all: database $(BF_BIN)
 
@@ -49,6 +52,11 @@ $(PCD_DB): $(DB_SRCS) $(DB_HDRS)
 # Baixa e extrai SIFT1M e SIFT10K (siftsmall) para data/ — pula o que ja existir
 download:
 	$(DATABASE_DIR)/download.sh all
+
+# Baixa o SIFT10M: os primeiros 10M vetores do SIFT1B/BIGANN (~1,3 GB, em streaming) + queries + ground truth
+# (~512 MB) para data/bigann/ — pula o que ja existir
+download-10m:
+	$(DATABASE_DIR)/download.sh sift10m
 
 # Converte os .fvecs/.ivecs em data/$(DATASET).db (validando N, D e valores)
 construct-db: database
@@ -69,6 +77,21 @@ status-db: database
 # Prova que o banco no ar nao aceita escrita
 test-db: database
 	@$(PCD_DB) test-readonly $(DATASET)
+
+# Atalhos por tamanho: <comando>-db-1m / -10m / -small = <comando>-db DATASET=sift1m / sift10m / siftsmall.
+# Ex.: `make construct-db-10m` e depois `make up-db-10m`. Dois bancos diferentes podem ficar no ar ao mesmo
+# tempo (segmentos /dev/shm/pcd_sift1m e /dev/shm/pcd_sift10m), se couberem na memoria.
+DB_SIZES := 1m=sift1m 10m=sift10m small=siftsmall
+define DB_ALIAS
+construct-db-$(1) up-db-$(1) down-db-$(1) status-db-$(1) test-db-$(1): DATASET = $(2)
+construct-db-$(1): construct-db
+up-db-$(1): up-db
+down-db-$(1): down-db
+status-db-$(1): status-db
+test-db-$(1): test-db
+.PHONY: construct-db-$(1) up-db-$(1) down-db-$(1) status-db-$(1) test-db-$(1)
+endef
+$(foreach s,$(DB_SIZES),$(eval $(call DB_ALIAS,$(word 1,$(subst =, ,$(s))),$(word 2,$(subst =, ,$(s))))))
 
 $(BF_BIN): $(BF_SRCS) $(BF_HDRS)
 	@mkdir -p $(BIN_DIR)

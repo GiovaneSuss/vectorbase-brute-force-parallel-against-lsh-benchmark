@@ -19,12 +19,14 @@ parser e o banco em memória compartilhada); as buscas ainda não.
   de índice de vetor e fazendo merge dos top-K locais.
 - **`scripts/lsh/`** — busca aproximada via LSH: estruturas `Bucket`/`LSHIndex`, indexação paralela
   (hash + buckets) e busca paralela por lote de queries.
-- **`data/`** — arquivos brutos do dataset (SIFT1M e SIFT10K, baixados por `make download`) e o banco
+- **`data/`** — arquivos brutos do dataset (SIFT1M e SIFT10K por `make download`; SIFT10M — os 10M
+  primeiros do SIFT1B — por `make download-10m`) e o banco
   convertido `<dataset>.db`. Não versionado no git.
 - **`results/`** — saída das execuções (CSV com as métricas do protocolo experimental). Não versionado no
   git.
 - **`Makefile`** (raiz) — orquestra os passos: `make download`, `make construct-db`, `make up-db`,
-  `make down-db`, `make status-db`, `make test-db` (todos com `DATASET=sift1m|siftsmall`), e
+  `make down-db`, `make status-db`, `make test-db` (todos com `DATASET=sift1m|sift10m|siftsmall`, ou os
+  atalhos `-1m`/`-10m`/`-small`, ex.: `make up-db-10m`), e
   `make brute-force THREADS=N` / `make lsh THREADS=N` (ainda placeholders `TODO`).
 
 ## Por que o banco fica num processo separado, em memória compartilhada

@@ -1,9 +1,10 @@
 // brute_force — experimento de busca exata sobre o banco em memoria compartilhada.
 //
-//   brute_force [--dataset sift1m] [--threads N | --seq] [--queries Q] [--k K] [--repeats R]
+//   brute_force [--dataset auto|sift1m|sift10m|siftsmall] [--threads N | --seq] [--queries Q] [--k K] [--repeats R]
 //               [--baseline SEGUNDOS] [--out results/brute-force]
 //
-// Precisa do banco no ar (`make up-db`). Para cada repeticao, busca as Q primeiras queries do dataset,
+// Precisa do banco no ar (`make up-db-1m` / `make up-db-10m`); com --dataset auto (padrao) usa o unico
+// banco que estiver no ar. Para cada repeticao, busca as Q primeiras queries do dataset,
 // mede tempo, CPU e energia, confere o recall@K contra o ground truth e grava os CSVs em
 // <out>/<data-hora>_<seq|tN>/ (summary.csv por repeticao, threads.csv por thread) e uma linha agregada em
 // <out>/runs.csv.
@@ -29,7 +30,7 @@
 namespace {
 
 struct Options {
-    std::string dataset = "sift1m";
+    std::string dataset = "auto"; // auto = o unico banco no ar
     bool sequential = false;
     int threads = 1;
     int queries = 100;
@@ -41,7 +42,7 @@ struct Options {
 
 int usage() {
     std::fprintf(stderr,
-                 "uso: brute_force [--dataset sift1m|siftsmall] [--threads N | --seq] [--queries Q] [--k K]\n"
+                 "uso: brute_force [--dataset auto|sift1m|sift10m|siftsmall] [--threads N | --seq] [--queries Q] [--k K]\n"
                  "                 [--repeats R] [--baseline SEGUNDOS] [--out DIR]\n");
     return 2;
 }
@@ -118,7 +119,7 @@ int main(int argc, char** argv) {
     }
 
     try {
-        DbView db = attach_db(opt.dataset);
+        DbView db = attach_db(resolve_dataset(opt.dataset));
         const DbHeader& h = *db.hdr;
         if (opt.queries > h.n_query)
             throw std::runtime_error("--queries " + std::to_string(opt.queries) + " maior que as " +

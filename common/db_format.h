@@ -59,6 +59,41 @@ inline uint64_t fnv1a64(const void* ptr, size_t len) {
     return h;
 }
 
+// Mesmo fnv1a64, mas alimentado em pedacos (o construct grava o banco em streaming, sem ter a imagem
+// inteira na memoria). update(a); update(b); digest() == fnv1a64(a ++ b), para qualquer divisao em pedacos.
+class Fnv1a64Stream {
+public:
+    void update(const void* ptr, size_t len) {
+        const unsigned char* p = static_cast<const unsigned char*>(ptr);
+        while (len > 0 && pending_ > 0) { // completa a palavra que ficou pela metade no pedaco anterior
+            buf_[pending_++] = *p++;
+            len--;
+            if (pending_ == 8) mix_word(buf_), pending_ = 0;
+        }
+        for (; len >= 8; p += 8, len -= 8) mix_word(p);
+        while (len > 0) buf_[pending_++] = *p++, len--;
+    }
+    uint64_t digest() const {
+        uint64_t h = h_;
+        for (size_t i = 0; i < pending_; i++) {
+            h ^= buf_[i];
+            h *= 1099511628211ULL;
+        }
+        return h;
+    }
+
+private:
+    void mix_word(const unsigned char* p) {
+        uint64_t w;
+        std::memcpy(&w, p, 8);
+        h_ ^= w;
+        h_ *= 1099511628211ULL;
+    }
+    uint64_t h_ = 1469598103934665603ULL;
+    unsigned char buf_[8];
+    size_t pending_ = 0;
+};
+
 // Confere se o cabecalho e coerente com um arquivo/segmento de mapped_size bytes.
 // Retorna string vazia se OK, ou a descricao do problema.
 inline std::string validate_header(const DbHeader& h, uint64_t mapped_size) {

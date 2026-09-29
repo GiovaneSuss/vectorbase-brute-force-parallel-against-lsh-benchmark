@@ -6,9 +6,11 @@
 //   pcd_db status <dataset>         conecta read-only, confere checksum e mostra amostras
 //   pcd_db test-readonly <dataset>  prova que o segmento nao aceita escrita
 //
-// Datasets: sift1m (data/sift/sift_*), siftsmall (data/siftsmall/siftsmall_*).
+// Datasets: sift1m (data/sift/sift_*), sift10m (data/bigann/: 10M primeiros do SIFT1B), siftsmall
+// (data/siftsmall/siftsmall_*).
 // Diretorio de dados: data/ (ou variavel de ambiente PCD_DATA_DIR).
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <csignal>
@@ -34,20 +36,29 @@
 namespace {
 
 struct DatasetSpec {
-    std::string name;    // nome do banco: "sift1m"
-    std::string prefix;  // prefixo dos arquivos brutos: data/<prefix>/<prefix>_base.fvecs
-    int n_base, d, n_query, gt_k;
+    std::string name;       // nome do banco: "sift1m"
+    std::string base_file;  // arquivos brutos, relativos a data/
+    std::string query_file;
+    std::string gt_file;
+    VecsType base_type;     // .fvecs (float) ou .bvecs (uint8, BIGANN) — as queries usam o mesmo formato
+    int n_base, d, n_query;
+    int gt_k;               // vizinhos por query guardados no banco (o arquivo pode ter mais: sao truncados)
 };
 
 const DatasetSpec DATASETS[] = {
-    {"sift1m", "sift", 1000000, 128, 10000, 100},
-    {"siftsmall", "siftsmall", 10000, 128, 100, 100},
+    {"sift1m", "sift/sift_base.fvecs", "sift/sift_query.fvecs", "sift/sift_groundtruth.ivecs", VecsType::Float,
+     1000000, 128, 10000, 100},
+    {"siftsmall", "siftsmall/siftsmall_base.fvecs", "siftsmall/siftsmall_query.fvecs",
+     "siftsmall/siftsmall_groundtruth.ivecs", VecsType::Float, 10000, 128, 100, 100},
+    // SIFT10M = 10M primeiros vetores do SIFT1B (BIGANN); o idx_10M.ivecs traz 1000 vizinhos/query, guardamos 100.
+    {"sift10m", "bigann/bigann_base_10M.bvecs", "bigann/bigann_query.bvecs", "bigann/idx_10M.ivecs", VecsType::Byte,
+     10000000, 128, 10000, 100},
 };
 
 const DatasetSpec& find_dataset(const std::string& name) {
     for (const auto& s : DATASETS)
         if (s.name == name) return s;
-    throw std::runtime_error("dataset desconhecido '" + name + "' (use sift1m ou siftsmall)");
+    throw std::runtime_error("dataset desconhecido '" + name + "' (use sift1m, sift10m ou siftsmall)");
 }
 
 std::string data_dir() {
@@ -61,18 +72,19 @@ double mib(uint64_t bytes) { return bytes / (1024.0 * 1024.0); }
 
 std::string sys_error(const std::string& what) { return what + ": " + std::strerror(errno); }
 
-void print_samples(const DbHeader& h, const float* base, const float* queries, const int* gt) {
+void print_samples(const DbHeader& h, const float* base_first, const float* base_last, const float* query0,
+                   const int* gt0) {
     auto row = [&](const char* label, const float* v) {
         std::printf("  %-22s", label);
         for (int j = 0; j < 8; j++) std::printf(" %5.0f", v[j]);
         std::printf(" ...\n");
     };
-    row("base[0][0..7]:", base);
+    row("base[0][0..7]:", base_first);
     std::string last = "base[" + std::to_string(h.n_base - 1) + "][0..7]:";
-    row(last.c_str(), base + uint64_t(h.n_base - 1) * h.d);
-    row("query[0][0..7]:", queries);
+    row(last.c_str(), base_last);
+    row("query[0][0..7]:", query0);
     std::printf("  %-22s", "gt[0][0..7]:");
-    for (int j = 0; j < 8; j++) std::printf(" %d", gt[j]);
+    for (int j = 0; j < 8; j++) std::printf(" %d", gt0[j]);
     std::printf(" ...\n");
 }
 
@@ -80,80 +92,125 @@ void print_samples(const DbHeader& h, const float* base, const float* queries, c
 // construct
 // ---------------------------------------------------------------------------------------------
 
-void check_values(const VectorDataset& ds, const std::string& label) {
-    // Descritores SIFT sao inteiros em [0, 255] guardados como float: qualquer coisa fora disso
-    // indica erro de parsing (ex.: prefixo de dimensao lido como dado).
-    for (uint64_t i = 0; i < ds.data.size(); i++) {
-        float x = ds.data[i];
+// Descritores SIFT sao inteiros em [0, 255] guardados como float: qualquer coisa fora disso indica erro de
+// parsing (ex.: prefixo de dimensao lido como dado). `first_row` e o indice do primeiro vetor do bloco.
+void check_values(const float* v, int rows, int d, int first_row, const std::string& label) {
+    for (uint64_t i = 0; i < uint64_t(rows) * d; i++) {
+        float x = v[i];
         if (!std::isfinite(x) || x < 0.0f || x > 255.0f || x != std::floor(x))
             throw std::runtime_error(label + ": valor invalido " + std::to_string(x) + " no vetor " +
-                                     std::to_string(i / ds.d) + ", dimensao " + std::to_string(i % ds.d));
+                                     std::to_string(first_row + i / d) + ", dimensao " + std::to_string(i % d));
     }
 }
 
-void expect(const std::string& label, int got_n, int got_d, int want_n, int want_d) {
-    std::printf("  %-14s %8d x %-4d", label.c_str(), got_n, got_d);
-    if (got_n != want_n || got_d != want_d)
-        throw std::runtime_error(label + ": esperado " + std::to_string(want_n) + " x " + std::to_string(want_d));
-    std::printf("OK\n");
+void expect(const std::string& label, int got_n, int got_d, int want_n, int want_d, bool at_least_d = false) {
+    std::printf("  %-14s %8d x %-5d", label.c_str(), got_n, got_d);
+    if (got_n != want_n || (at_least_d ? got_d < want_d : got_d != want_d))
+        throw std::runtime_error(label + ": esperado " + std::to_string(want_n) + " x " +
+                                 (at_least_d ? ">= " : "") + std::to_string(want_d));
+    if (got_d != want_d) std::printf("OK (guardando so os %d primeiros)\n", want_d);
+    else std::printf("OK\n");
 }
 
+// Grava o banco em streaming, bloco a bloco: le do arquivo bruto, valida, escreve no .db e alimenta o checksum.
+// Assim a memoria usada e so a de um bloco (~32 MiB), e nao o banco inteiro — o SIFT10M tem 5,1 GB.
 int cmd_construct(const DatasetSpec& s) {
-    const std::string raw = data_dir() + "/" + s.prefix + "/" + s.prefix;
-    std::printf("[construct] lendo %s_{base,query}.fvecs e %s_groundtruth.ivecs\n", raw.c_str(), raw.c_str());
+    const std::string dir = data_dir() + "/";
+    std::printf("[construct] lendo %s%s, %s%s e %s%s\n", dir.c_str(), s.base_file.c_str(), dir.c_str(),
+                s.query_file.c_str(), dir.c_str(), s.gt_file.c_str());
 
-    VectorDataset base = read_fvecs(raw + "_base.fvecs");
-    VectorDataset query = read_fvecs(raw + "_query.fvecs");
-    IntDataset gt = read_ivecs(raw + "_groundtruth.ivecs");
+    VecsReader base(dir + s.base_file, s.base_type);
+    VecsReader query(dir + s.query_file, s.base_type);
+    VecsReader gt(dir + s.gt_file, VecsType::Int);
 
     std::printf("[construct] validando dimensoes\n");
-    expect("base", base.n, base.d, s.n_base, s.d);
-    expect("queries", query.n, query.d, s.n_query, s.d);
-    expect("ground truth", gt.n, gt.d, s.n_query, s.gt_k);
-
-    std::printf("[construct] validando valores\n");
-    check_values(base, "base");
-    check_values(query, "queries");
-    for (uint64_t i = 0; i < gt.data.size(); i++)
-        if (gt.data[i] < 0 || gt.data[i] >= base.n)
-            throw std::runtime_error("ground truth: id " + std::to_string(gt.data[i]) + " fora de [0, " +
-                                     std::to_string(base.n) + ") na query " + std::to_string(i / gt.d));
-    std::printf("  base/queries inteiros em [0,255], ids do ground truth em [0,%d)  OK\n", base.n);
+    expect("base", base.n(), base.d(), s.n_base, s.d);
+    expect("queries", query.n(), query.d(), s.n_query, s.d);
+    expect("ground truth", gt.n(), gt.d(), s.n_query, s.gt_k, true);
 
     DbHeader h{};
     std::memcpy(h.magic, DB_MAGIC, sizeof(DB_MAGIC));
     h.version = DB_VERSION;
     std::snprintf(h.dataset, sizeof(h.dataset), "%s", s.name.c_str());
-    h.n_base = base.n;
-    h.d = base.d;
-    h.n_query = query.n;
-    h.gt_k = gt.d;
+    h.n_base = s.n_base;
+    h.d = s.d;
+    h.n_query = s.n_query;
+    h.gt_k = s.gt_k;
     h.off_base = DB_ALIGN;
-    h.off_query = db_align_up(h.off_base + base.data.size() * sizeof(float));
-    h.off_gt = db_align_up(h.off_query + query.data.size() * sizeof(float));
-    h.total_size = db_align_up(h.off_gt + gt.data.size() * sizeof(int));
-
-    // Monta a imagem inteira em memoria (zerada = padding determinístico) para calcular o checksum.
-    std::vector<char> image(h.total_size, 0);
-    std::memcpy(image.data() + h.off_base, base.data.data(), base.data.size() * sizeof(float));
-    std::memcpy(image.data() + h.off_query, query.data.data(), query.data.size() * sizeof(float));
-    std::memcpy(image.data() + h.off_gt, gt.data.data(), gt.data.size() * sizeof(int));
-    h.checksum = fnv1a64(image.data() + h.off_base, h.total_size - h.off_base);
-    std::memcpy(image.data(), &h, sizeof(h));
+    h.off_query = db_align_up(h.off_base + uint64_t(h.n_base) * h.d * sizeof(float));
+    h.off_gt = db_align_up(h.off_query + uint64_t(h.n_query) * h.d * sizeof(float));
+    h.total_size = db_align_up(h.off_gt + uint64_t(h.n_query) * h.gt_k * sizeof(int));
 
     const std::string out = db_path(s);
     const std::string tmp = out + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) throw std::runtime_error("nao consegui criar " + tmp);
-        f.write(image.data(), image.size());
-        if (!f) throw std::runtime_error("erro escrevendo " + tmp);
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) throw std::runtime_error("nao consegui criar " + tmp);
+
+    Fnv1a64Stream sum;
+    uint64_t pos = 0;
+    auto emit = [&](const void* p, uint64_t len) {
+        f.write(static_cast<const char*>(p), len);
+        if (!f) throw std::runtime_error("erro escrevendo " + tmp + " (disco cheio?)");
+        if (pos >= h.off_base) sum.update(p, len);
+        pos += len;
+    };
+    const std::vector<char> zeros(DB_ALIGN, 0); // padding zerado = checksum deterministico
+    auto pad_to = [&](uint64_t off) {
+        while (pos < off) emit(zeros.data(), std::min<uint64_t>(off - pos, zeros.size()));
+    };
+    pad_to(h.off_base); // cabecalho provisorio (zerado); o verdadeiro e escrito no fim, com o checksum
+
+    const int CHUNK = 65536; // vetores por bloco: 65536 * 128 * 4 B = 32 MiB
+    std::vector<float> fbuf(size_t(CHUNK) * s.d);
+    std::vector<float> base_first(s.d), base_last(s.d), query0(s.d);
+    std::vector<int> gt0(s.gt_k);
+
+    auto copy_vectors = [&](VecsReader& r, const std::string& label, bool progress) {
+        for (int done = 0; done < r.n();) {
+            const int rows = std::min(CHUNK, r.n() - done);
+            r.read_rows(rows, fbuf.data());
+            check_values(fbuf.data(), rows, s.d, done, label);
+            emit(fbuf.data(), uint64_t(rows) * s.d * sizeof(float));
+            if (done == 0) std::copy_n(fbuf.data(), s.d, (label == "base" ? base_first : query0).data());
+            done += rows;
+            if (done == r.n() && label == "base")
+                std::copy_n(fbuf.data() + size_t(rows - 1) * s.d, s.d, base_last.data());
+            if (progress && (done / CHUNK) % 16 == 0 && done < r.n())
+                std::printf("  %s: %d / %d vetores\n", label.c_str(), done, r.n()), std::fflush(stdout);
+        }
+    };
+
+    std::printf("[construct] convertendo e validando a base (valores inteiros em [0,255])\n");
+    copy_vectors(base, "base", s.n_base > 2000000);
+    pad_to(h.off_query);
+    copy_vectors(query, "queries", false);
+    pad_to(h.off_gt);
+
+    std::vector<int> ibuf(size_t(CHUNK) * s.gt_k);
+    for (int done = 0; done < gt.n();) {
+        const int rows = std::min(CHUNK, gt.n() - done);
+        gt.read_rows(rows, ibuf.data(), s.gt_k);
+        for (uint64_t i = 0; i < uint64_t(rows) * s.gt_k; i++)
+            if (ibuf[i] < 0 || ibuf[i] >= s.n_base)
+                throw std::runtime_error("ground truth: id " + std::to_string(ibuf[i]) + " fora de [0, " +
+                                         std::to_string(s.n_base) + ") na query " + std::to_string(done + i / s.gt_k));
+        if (done == 0) std::copy_n(ibuf.data(), s.gt_k, gt0.data());
+        emit(ibuf.data(), uint64_t(rows) * s.gt_k * sizeof(int));
+        done += rows;
     }
+    pad_to(h.total_size);
+    std::printf("  base/queries inteiros em [0,255], ids do ground truth em [0,%d)  OK\n", s.n_base);
+
+    h.checksum = sum.digest();
+    f.seekp(0);
+    f.write(reinterpret_cast<const char*>(&h), sizeof(h));
+    f.close();
+    if (!f) throw std::runtime_error("erro finalizando " + tmp);
     if (std::rename(tmp.c_str(), out.c_str()) != 0) throw std::runtime_error(sys_error("rename " + tmp));
 
     std::printf("[construct] banco gravado em %s (%.1f MiB, checksum %016llx)\n", out.c_str(), mib(h.total_size),
                 (unsigned long long)h.checksum);
-    print_samples(h, base.data.data(), query.data.data(), gt.data.data());
+    print_samples(h, base_first.data(), base_last.data(), query0.data(), gt0.data());
     return 0;
 }
 
@@ -185,8 +242,10 @@ int cmd_up(const DatasetSpec& s) {
     if (statvfs("/dev/shm", &vfs) == 0) {
         uint64_t avail = uint64_t(vfs.f_bavail) * vfs.f_frsize;
         if (avail < h.total_size)
-            throw std::runtime_error("/dev/shm tem so " + std::to_string(mib(avail)) + " MiB livres, o banco precisa de " +
-                                     std::to_string(mib(h.total_size)) + " MiB");
+            throw std::runtime_error("/dev/shm tem so " + std::to_string(uint64_t(mib(avail))) +
+                                     " MiB livres, o banco precisa de " + std::to_string(uint64_t(mib(h.total_size))) +
+                                     " MiB. Se houver RAM sobrando, aumente o tmpfs: "
+                                     "`sudo mount -o remount,size=<N>G /dev/shm` (ou derrube outros bancos no ar)");
     }
 
     const std::string name = db_segment_name(s.name);
@@ -280,7 +339,7 @@ int cmd_status(const DatasetSpec& s) {
     std::printf("  base %d x %d | queries %d | ground truth k=%d | %.1f MiB\n", h.n_base, h.d, h.n_query, h.gt_k,
                 mib(h.total_size));
     std::printf("  checksum %016llx: %s\n", (unsigned long long)h.checksum, ok ? "OK" : "DIVERGENTE — banco corrompido!");
-    print_samples(h, v.base, v.queries, v.gt);
+    print_samples(h, v.base, v.base + uint64_t(h.n_base - 1) * h.d, v.queries, v.gt);
     detach_db(v);
     return ok ? 0 : 1;
 }
@@ -328,7 +387,7 @@ int cmd_test_readonly(const DatasetSpec& s) {
 }
 
 int usage() {
-    std::fprintf(stderr, "uso: pcd_db {construct|up|down|status|test-readonly} <sift1m|siftsmall>\n");
+    std::fprintf(stderr, "uso: pcd_db {construct|up|down|status|test-readonly} <sift1m|sift10m|siftsmall>\n");
     return 2;
 }
 

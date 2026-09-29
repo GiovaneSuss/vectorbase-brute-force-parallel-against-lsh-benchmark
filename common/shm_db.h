@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "db_format.h"
 
@@ -19,6 +20,12 @@ struct DbView {
     const int* gt = nullptr;         // n_query * gt_k (ids dos vizinhos corretos, em ordem)
     size_t size = 0;                 // bytes mapeados
 };
+
+// Datasets com segmento em /dev/shm (pcd_<dataset>), em ordem alfabetica.
+std::vector<std::string> list_online_dbs();
+
+// "auto" -> o unico banco no ar (erro se nenhum ou mais de um); qualquer outro nome e devolvido como veio.
+std::string resolve_dataset(const std::string& requested);
 
 // Lanca std::runtime_error com mensagem clara se o banco nao estiver no ar ou for invalido.
 DbView attach_db(const std::string& dataset);

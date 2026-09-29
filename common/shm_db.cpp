@@ -1,13 +1,44 @@
 #include "shm_db.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+std::vector<std::string> list_online_dbs() {
+    std::vector<std::string> out;
+    const std::string prefix = db_segment_name("").substr(1); // "pcd_"
+    if (DIR* dir = opendir("/dev/shm")) {
+        while (const dirent* e = readdir(dir)) {
+            const std::string name = e->d_name;
+            if (name.size() > prefix.size() && name.compare(0, prefix.size(), prefix) == 0)
+                out.push_back(name.substr(prefix.size()));
+        }
+        closedir(dir);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::string resolve_dataset(const std::string& requested) {
+    if (requested != "auto") return requested;
+    const std::vector<std::string> online = list_online_dbs();
+    if (online.empty())
+        throw std::runtime_error("nenhum banco no ar — rode `make up-db-1m` ou `make up-db-10m` em outro terminal");
+    if (online.size() > 1) {
+        std::string names;
+        for (const auto& n : online) names += (names.empty() ? "" : ", ") + n;
+        throw std::runtime_error("ha mais de um banco no ar (" + names + ") — escolha com DATASET=<nome>, ex.: "
+                                 "`make brute-force DATASET=" + online[0] + "`");
+    }
+    return online[0];
+}
 
 DbView attach_db(const std::string& dataset) {
     const std::string name = db_segment_name(dataset);
