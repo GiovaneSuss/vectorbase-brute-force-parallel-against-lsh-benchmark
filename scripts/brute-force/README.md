@@ -16,10 +16,14 @@ compartilhada (`attach_db`, ponteiros `const` — sem cópia).
 Por execução (`results/brute-force/<data-hora>_<seq|tN>/`):
 
 - `summary.csv` — por repetição: tempo de busca, tempo do merge, ms/query, CPU do processo, utilização, energia,
-  trocas de contexto.
+  trocas de contexto e horário de início/fim (`search_start_unix`/`search_end_unix`, para cruzar com o log de
+  potência do HWiNFO no WSL — `scripts/energia/`).
 - `threads.csv` — por thread e repetição: faixa de vetores, tempo de varredura, CPU da thread, ocupação
   (fração do tempo total em que a thread trabalhou — o resto foi espera na barreira) e núcleo usado.
-- `run.csv` — uma linha agregada (média/desvio/mínimo das repetições, recall, speedup, eficiência, energia).
+- `queries.csv` — por query: recall, recall estrito e razão de distância (devolvido ÷ verdadeiro; 1,0 = exato).
+- `run.csv` — uma linha agregada (média/desvio/mínimo das repetições, recall, speedup, eficiência, energia,
+  `effective_gbps` — banda efetiva, base inteira lida por query, para comparar com o teto do `membw` —, pior
+  recall por query, % de queries com recall 1 e razão de distância média).
   A mesma linha é acrescentada em `results/brute-force/runs.csv`, que junta todas as execuções.
 
 Energia: lida do Intel RAPL (`/sys/class/powercap/intel-rapl:*`) quando o sistema expõe; senão fica `NA` e o

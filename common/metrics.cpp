@@ -20,6 +20,12 @@ double wall_time() {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
+double unix_time() {
+    timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
 double thread_cpu_time() {
     timespec ts;
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);

@@ -7,11 +7,12 @@ THREADS ?= 4
 # Dataset do banco: sift1m (padrao), sift10m (10M primeiros do SIFT1B) ou siftsmall (10K, testes rapidos).
 # Atalhos sem precisar de DATASET=: make up-db-1m, make up-db-10m, make up-db-small (idem construct/down/status/test)
 DATASET ?= sift1m
-# Parametros dos experimentos de busca
-QUERIES ?= 100
+# Parametros dos experimentos de busca (protocolo: 1024 queries, 5 repeticoes, 1 a 32 threads —
+# 32 = CPUs logicas da maior maquina testada, o limite fisico que importa)
+QUERIES ?= 1024
 K ?= 10
-REPEATS ?= 3
-THREAD_LIST ?= 1 2 4 8
+REPEATS ?= 5
+THREAD_LIST ?= 1 2 4 8 16 32
 # Parametros do LSH (fixos entre configuracoes: mesma semente = mesmo indice). LSH_BUCKETS=0 = automatico (~n/16)
 LSH_TABLES ?= 32
 LSH_HASHES ?= 10
@@ -20,6 +21,16 @@ LSH_BUCKETS ?= 0
 SEED ?= 42
 # Queries por lote no schedule(dynamic) da busca LSH paralela
 BATCH ?= 1
+# Configuracoes do LSH sequencial rodadas no `make experimento` (curva recall x velocidade), como L:K:w.
+# Recall@10 medido no SIFT1M (1024 queries): ~0.87, ~0.915 (padrao), ~0.945, ~0.97, ~0.99
+LSH_CONFIGS ?= 8:8:1000 32:10:800 32:12:1000 32:14:1200 40:14:1300
+LSH_CONFIGS_10M ?= $(LSH_CONFIGS)
+# Threads do brute-force no SIFT10M (padrao = THREAD_LIST; o 10M e o que mais demora)
+THREAD_LIST_10M ?= $(THREAD_LIST)
+# Pasta dos resultados do `make experimento` (results/<MAQUINA>/); padrao = nome da maquina
+MAQUINA ?= $(shell hostname)
+# Rodadas completas do experimento (RODADAS=5 -> results/<MAQUINA>/rodada-1 ... rodada-5)
+RODADAS ?= 1
 
 # Fixa cada thread OpenMP num nucleo (threads vizinhas em nucleos vizinhos): sem isso o SO migra as
 # threads entre nucleos no meio da medicao e o tempo fica ruidoso.
@@ -45,6 +56,10 @@ BF_HDRS := $(wildcard $(BF_DIR)/*.h $(COMMON_DIR)/*.h)
 SEARCH_DATASET := $(if $(filter command line environment,$(origin DATASET)),$(DATASET),auto)
 BF_ARGS := --dataset $(SEARCH_DATASET) --queries $(QUERIES) --k $(K) --repeats $(REPEATS) --out $(RESULTS_DIR)/brute-force
 
+MEMBW_BIN := $(BIN_DIR)/membw
+MEMBW_DIR := $(SCRIPTS_DIR)/membw
+MEMBW_SRCS := $(MEMBW_DIR)/membw.cpp $(COMMON_DIR)/metrics.cpp
+
 LSH_BIN := $(BIN_DIR)/lsh
 LSH_DIR := $(SCRIPTS_DIR)/lsh
 LSH_SRCS := $(LSH_DIR)/main.cpp $(LSH_DIR)/lsh.cpp $(COMMON_DIR)/shm_db.cpp $(COMMON_DIR)/metrics.cpp
@@ -54,9 +69,9 @@ LSH_ARGS := --dataset $(SEARCH_DATASET) --queries $(QUERIES) --k $(K) --repeats 
             --seed $(SEED) --out $(RESULTS_DIR)/lsh
 
 .PHONY: all database download download-10m construct-db up-db down-db status-db test-db brute-force \
-        brute-force-seq bench-brute-force lsh lsh-seq bench-lsh clean
+        brute-force-seq bench-brute-force lsh lsh-seq bench-lsh membw experimento energia clean
 
-all: database $(BF_BIN) $(LSH_BIN)
+all: database $(BF_BIN) $(LSH_BIN) $(MEMBW_BIN)
 
 # Compila a ferramenta do banco (parser .fvecs/.ivecs + construcao + memoria compartilhada)
 database: $(PCD_DB)
@@ -140,6 +155,32 @@ lsh-seq: $(LSH_BIN)
 # Roda o sequencial e depois o paralelo para cada valor de THREAD_LIST, com speedup e eficiencia
 bench-lsh: $(LSH_BIN)
 	@$(LSH_DIR)/bench.sh "$(LSH_BIN)" "$(THREAD_LIST)" --batch $(BATCH) $(LSH_ARGS)
+
+$(MEMBW_BIN): $(MEMBW_SRCS) $(COMMON_DIR)/metrics.h
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(COMMON_DIR) -o $@ $(MEMBW_SRCS) $(LDFLAGS)
+
+# Banda de memoria (leitura sequencial e triad do STREAM) para cada valor de THREAD_LIST — nao precisa do banco
+membw: $(MEMBW_BIN)
+	@for t in $(THREAD_LIST); do $(MEMBW_BIN) --threads $$t --out $(RESULTS_DIR)/membw; done
+
+# Protocolo completo numa tacada so, em results/$(MAQUINA)/: informacoes da maquina, janela ociosa (base da
+# energia), banda de memoria, e para cada dataset sobe o banco sozinho, roda o brute-force (sequencial +
+# THREAD_LIST) e o LSH sequencial em cada LSH_CONFIGS, e derruba o banco. Ver scripts/experimento.sh.
+experimento: all
+	@for r in $$(seq $(RODADAS)); do \
+	  m="$(MAQUINA)"; if [ "$(RODADAS)" -gt 1 ]; then m="$(MAQUINA)/rodada-$$r"; fi; \
+	  echo "### rodada $$r de $(RODADAS) -> results/$$m"; \
+	 MAQUINA="$$m" QUERIES="$(QUERIES)" K="$(K)" REPEATS="$(REPEATS)" THREAD_LIST="$(THREAD_LIST)" \
+	 THREAD_LIST_10M="$(THREAD_LIST_10M)" LSH_CONFIGS="$(LSH_CONFIGS)" LSH_CONFIGS_10M="$(LSH_CONFIGS_10M)" \
+	 SEED="$(SEED)" $(SCRIPTS_DIR)/experimento.sh || exit 1; \
+	done
+
+# Energia no WSL (sem RAPL no Linux): refaz o calculo a partir do RAPL do Windows gravado pelo experimento
+# (energia/windows_rapl.csv — o `make experimento` ja roda isto no fim) ou de um log do HWiNFO:
+# make energia MAQUINA=suss [HWINFO=/mnt/c/.../log.csv]
+energia:
+	@python3 $(SCRIPTS_DIR)/energia/energia.py --results $(RESULTS_DIR)/$(MAQUINA) $(if $(HWINFO),--hwinfo "$(HWINFO)")
 
 clean:
 	rm -rf $(BIN_DIR)

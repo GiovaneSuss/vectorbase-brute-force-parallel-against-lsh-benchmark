@@ -30,9 +30,9 @@ struct Options {
     std::string dataset = "auto"; // auto = o unico banco no ar
     bool sequential = false;
     int threads = 1;
-    int queries = 100;
+    int queries = 1024;
     int k = 10;
-    int repeats = 3;
+    int repeats = 5;
     int batch = 1;               // queries por lote no schedule(dynamic) da busca paralela
     LSHParams lsh;
     double baseline_s = 0;       // busca sequencial media, para speedup/eficiencia da busca (0 = nao informado)
@@ -87,6 +87,8 @@ struct RepeatResult {
     double search_s = 0;          // tempo de parede de todas as queries (so a busca)
     double cpu_s = 0;             // CPU do processo durante a busca
     double energy_j = NAN;
+    double index_start_unix = 0, index_end_unix = 0;   // relogio de calendario das duas fases, para cruzar
+    double search_start_unix = 0, search_end_unix = 0; // com logs externos de potencia (HWiNFO no WSL)
     ProcessUsage usage_delta;     // da busca
     std::vector<LshThreadStats> threads;
 };
@@ -161,6 +163,7 @@ int main(int argc, char** argv) {
         if (!energy.available()) std::printf("  energia: %s — gravando NA\n", energy.unavailable_reason().c_str());
 
         std::vector<Neighbor> results(size_t(Q) * k);
+        std::vector<int64_t> query_candidates(Q);
         std::vector<LSHIndex> index;
         IndexShape shape;
         std::vector<RepeatResult> reps;
@@ -172,10 +175,12 @@ int main(int argc, char** argv) {
             // ---- indexacao ----
             ProcessUsage u0 = process_usage();
             if (energy.available()) energy.start();
+            rr.index_start_unix = unix_time();
             const double t0 = wall_time();
             if (opt.sequential) index = lsh_build_sequential(fam, db.base, n, d, rr.idx, rr.threads[0]);
             else index = lsh_build_parallel(fam, db.base, n, d, T, rr.idx, rr.threads.data());
             rr.index_s = wall_time() - t0;
+            rr.index_end_unix = unix_time();
             if (energy.available()) rr.index_energy_j = energy.stop_joules();
             ProcessUsage u1 = process_usage();
             rr.index_cpu_s = (u1.user_s - u0.user_s) + (u1.sys_s - u0.sys_s);
@@ -184,13 +189,16 @@ int main(int argc, char** argv) {
             // ---- busca ----
             ProcessUsage u2 = process_usage();
             if (energy.available()) energy.start();
+            rr.search_start_unix = unix_time();
             const double t1 = wall_time();
             if (opt.sequential)
-                lsh_search_sequential(fam, index, db.base, n, d, db.queries, Q, k, results.data(), rr.threads[0]);
+                lsh_search_sequential(fam, index, db.base, n, d, db.queries, Q, k, results.data(), rr.threads[0],
+                                      query_candidates.data());
             else
                 lsh_search_parallel(fam, index, db.base, n, d, db.queries, Q, k, T, opt.batch, results.data(),
-                                    rr.threads.data());
+                                    rr.threads.data(), query_candidates.data());
             rr.search_s = wall_time() - t1;
+            rr.search_end_unix = unix_time();
             if (energy.available()) rr.energy_j = energy.stop_joules();
             ProcessUsage u3 = process_usage();
             rr.cpu_s = (u3.user_s - u2.user_s) + (u3.sys_s - u2.sys_s);
@@ -210,7 +218,14 @@ int main(int argc, char** argv) {
         }
 
         // LSH e aproximado: recall < 1.0 e o esperado (ver common/recall.h sobre empates de distancia).
-        const Recall recall = compute_recall(results.data(), Q, k, db.gt, h.gt_k, db.base, db.queries, d);
+        const std::vector<QueryRecall> per_query =
+            per_query_recall(results.data(), Q, k, db.gt, h.gt_k, db.base, db.queries, d);
+        Recall recall;
+        for (const QueryRecall& q : per_query) {
+            recall.strict += q.strict / Q;
+            recall.tie_aware += q.tie_aware / Q;
+        }
+        const RecallSummary rsum = summarize_recall(per_query);
 
         // ------------------------------------------------------------------------------------------
         // Agregados, impressao e CSVs
@@ -238,6 +253,8 @@ int main(int argc, char** argv) {
         const double index_speedup = opt.index_baseline_s > 0 ? opt.index_baseline_s / index_mean : NAN;
         const double index_efficiency = opt.index_baseline_s > 0 ? index_speedup / T : NAN;
         const double cpu_util = cpu_mean / (search_mean * T);
+        // Banda efetiva: so os vetores candidatos sao lidos (o brute-force le a base inteira por query).
+        const double effective_gbps = double(cand_total) * d * sizeof(float) / search_mean / 1e9;
 
         const std::string run_id = timestamp_id() + "_" + (opt.sequential ? "seq" : "t" + std::to_string(T));
         const std::string run_dir = unique_run_dir(opt.out_dir + "/" + run_id);
@@ -259,6 +276,8 @@ int main(int argc, char** argv) {
                     100.0 * cand_per_query / n);
         std::printf("  recall@%d = %.4f (considerando empates de distancia) | %.4f (estrito, por id)\n", k,
                     recall.tie_aware, recall.strict);
+        std::printf("  por query: pior recall %.2f | %.1f%% das queries com recall 1 | razao de distancia media %.4f\n",
+                    rsum.min_tie_aware, rsum.perfect_pct, rsum.ratio_mean);
         std::printf("  CPU: %.3f s por repeticao (%.0f%% de utilizacao media das %d threads)\n", cpu_mean,
                     100 * cpu_util, T);
         if (!std::isnan(energy_mean))
@@ -300,7 +319,8 @@ int main(int argc, char** argv) {
 
         CsvTable summary_csv({"run_id", "repeat", "index_s", "index_hash_s", "index_build_s", "index_cpu_s",
                               "index_energy_j", "search_s", "ms_per_query", "cpu_s", "cpu_util_pct", "energy_j",
-                              "invol_ctx_switches", "vol_ctx_switches", "minor_faults"});
+                              "invol_ctx_switches", "vol_ctx_switches", "minor_faults", "index_start_unix",
+                              "index_end_unix", "search_start_unix", "search_end_unix"});
         for (size_t r = 0; r < reps.size(); r++) {
             const RepeatResult& rr = reps[r];
             summary_csv.add_row({run_id, std::to_string(r + 1), fmt(rr.index_s), fmt(rr.idx.hash_s),
@@ -309,8 +329,18 @@ int main(int argc, char** argv) {
                                  fmt(100 * rr.cpu_s / (rr.search_s * T), 1), fmt_or_na(rr.energy_j, 3),
                                  std::to_string(rr.usage_delta.invol_ctx_switches),
                                  std::to_string(rr.usage_delta.vol_ctx_switches),
-                                 std::to_string(rr.usage_delta.minor_faults)});
+                                 std::to_string(rr.usage_delta.minor_faults), fmt(rr.index_start_unix, 3),
+                                 fmt(rr.index_end_unix, 3), fmt(rr.search_start_unix, 3),
+                                 fmt(rr.search_end_unix, 3)});
         }
+
+        // Por query (resultado da ultima repeticao — o indice e a busca sao deterministicos).
+        CsvTable queries_csv({"run_id", "query", "recall_at_k", "recall_at_k_strict", "dist_ratio_mean",
+                              "dist_ratio_kth", "candidates"});
+        for (int q = 0; q < Q; q++)
+            queries_csv.add_row({run_id, std::to_string(q), fmt(per_query[q].tie_aware, 4),
+                                 fmt(per_query[q].strict, 4), fmt_or_na(per_query[q].ratio_mean, 6),
+                                 fmt_or_na(per_query[q].ratio_kth, 6), std::to_string(query_candidates[q])});
 
         // Colunas da busca com os mesmos nomes do runs.csv do brute-force, para a analise juntar os dois.
         CsvTable runs_csv({"run_id", "timestamp", "host", "cpu_model", "algorithm", "dataset", "threads", "n_base", "d",
@@ -321,7 +351,8 @@ int main(int argc, char** argv) {
                            "search_s_std", "search_s_min", "ms_per_query", "queries_per_s", "candidates_per_query",
                            "candidate_pct", "recall_at_k", "recall_at_k_strict", "cpu_s_mean", "cpu_util_pct",
                            "energy_j_mean", "avg_power_w", "energy_mj_per_query", "baseline_s", "speedup",
-                           "efficiency", "max_rss_mb", "omp_proc_bind", "omp_places"});
+                           "efficiency", "max_rss_mb", "omp_proc_bind", "omp_places", "effective_gbps",
+                           "recall_min_query", "queries_perfect_pct", "dist_ratio_mean", "dist_ratio_kth_max"});
         runs_csv.add_row({run_id, timestamp_iso(), hostname(), cpu_model(), algorithm, h.dataset, std::to_string(T),
                           std::to_string(n), std::to_string(d), std::to_string(Q), std::to_string(k),
                           std::to_string(opt.repeats), std::to_string(P.tables), std::to_string(P.hashes),
@@ -339,10 +370,12 @@ int main(int argc, char** argv) {
                           fmt_or_na(energy_mean * 1e3 / Q, 4), opt.baseline_s > 0 ? fmt(opt.baseline_s) : "NA",
                           fmt_or_na(speedup, 3), fmt_or_na(efficiency, 3),
                           fmt(reps.back().usage_delta.max_rss_kb / 1024.0, 1), env_or("OMP_PROC_BIND", "unset"),
-                          env_or("OMP_PLACES", "unset")});
+                          env_or("OMP_PLACES", "unset"), fmt(effective_gbps, 2), fmt(rsum.min_tie_aware, 4),
+                          fmt(rsum.perfect_pct, 2), fmt_or_na(rsum.ratio_mean, 6), fmt_or_na(rsum.ratio_kth_max, 6)});
 
         summary_csv.write(run_dir + "/summary.csv");
         threads_csv.write(run_dir + "/threads.csv");
+        queries_csv.write(run_dir + "/queries.csv");
         runs_csv.write(run_dir + "/run.csv");
         runs_csv.append(opt.out_dir + "/runs.csv");
         std::printf("\n  CSVs gravados em %s/ (e uma linha em %s/runs.csv)\n", run_dir.c_str(), opt.out_dir.c_str());

@@ -107,13 +107,15 @@ struct QueryScratch {
 int64_t lsh_query(const LSHFamily& fam, const std::vector<LSHIndex>& index, const float* base, int d,
                   const float* query, int k, QueryScratch& scratch, Neighbor* out);
 
-// Q queries em sequencia, uma thread — baseline do speedup da busca.
+// Q queries em sequencia, uma thread — baseline do speedup da busca. Se `candidates` nao for nulo, recebe o
+// numero de candidatos distintos de cada query (Q posicoes).
 void lsh_search_sequential(const LSHFamily& fam, const std::vector<LSHIndex>& index, const float* base, int n, int d,
-                           const float* queries, int Q, int k, Neighbor* out, LshThreadStats& stats);
+                           const float* queries, int Q, int k, Neighbor* out, LshThreadStats& stats,
+                           int64_t* candidates = nullptr);
 
 // Q queries em paralelo: o trabalho de uma query e pequeno demais para dividir entre threads, entao a
 // paralelizacao e ENTRE queries — cada thread pega lotes de `batch` queries (schedule dynamic: queries com
 // buckets maiores custam mais, e o dynamic reequilibra a carga).
 void lsh_search_parallel(const LSHFamily& fam, const std::vector<LSHIndex>& index, const float* base, int n, int d,
                          const float* queries, int Q, int k, int threads, int batch, Neighbor* out,
-                         LshThreadStats* stats);
+                         LshThreadStats* stats, int64_t* candidates = nullptr);

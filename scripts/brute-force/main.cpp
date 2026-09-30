@@ -6,8 +6,8 @@
 // Precisa do banco no ar (`make up-db-1m` / `make up-db-10m`); com --dataset auto (padrao) usa o unico
 // banco que estiver no ar. Para cada repeticao, busca as Q primeiras queries do dataset,
 // mede tempo, CPU e energia, confere o recall@K contra o ground truth e grava os CSVs em
-// <out>/<data-hora>_<seq|tN>/ (summary.csv por repeticao, threads.csv por thread) e uma linha agregada em
-// <out>/runs.csv.
+// <out>/<data-hora>_<seq|tN>/ (summary.csv por repeticao, threads.csv por thread, queries.csv por query) e uma
+// linha agregada em <out>/runs.csv.
 
 #include <algorithm>
 #include <cmath>
@@ -33,9 +33,9 @@ struct Options {
     std::string dataset = "auto"; // auto = o unico banco no ar
     bool sequential = false;
     int threads = 1;
-    int queries = 100;
+    int queries = 1024;
     int k = 10;
-    int repeats = 3;
+    int repeats = 5;
     double baseline_s = 0; // tempo medio do sequencial, para calcular speedup/eficiencia (0 = nao informado)
     std::string out_dir = "results/brute-force";
 };
@@ -76,6 +76,7 @@ struct RepeatResult {
     double merge_s = 0;    // parte do search_s gasta no merge sequencial dos top-k locais
     double cpu_s = 0;      // CPU (user + sys) do processo inteiro durante a busca
     double energy_j = NAN; // energia do pacote da CPU (RAPL) ou NAN se indisponivel
+    double start_unix = 0, end_unix = 0; // relogio de calendario, para cruzar com logs externos de potencia
     ProcessUsage usage_delta;
     std::vector<ThreadStats> threads;
 };
@@ -129,6 +130,7 @@ int main(int argc, char** argv) {
 
             ProcessUsage u0 = process_usage();
             if (energy.available()) energy.start();
+            rr.start_unix = unix_time();
             const double t0 = wall_time();
 
             for (int q = 0; q < Q; q++) {
@@ -147,6 +149,7 @@ int main(int argc, char** argv) {
             }
 
             rr.search_s = wall_time() - t0;
+            rr.end_unix = unix_time();
             if (energy.available()) rr.energy_j = energy.stop_joules();
             ProcessUsage u1 = process_usage();
             rr.cpu_s = (u1.user_s - u0.user_s) + (u1.sys_s - u0.sys_s);
@@ -163,7 +166,14 @@ int main(int argc, char** argv) {
         }
 
         // Brute-force e exato: o recall esperado e 1.0 (ver common/recall.h sobre empates de distancia).
-        const Recall recall = compute_recall(results.data(), Q, k, db.gt, h.gt_k, db.base, db.queries, d);
+        const std::vector<QueryRecall> per_query =
+            per_query_recall(results.data(), Q, k, db.gt, h.gt_k, db.base, db.queries, d);
+        Recall recall;
+        for (const QueryRecall& q : per_query) {
+            recall.strict += q.strict / Q;
+            recall.tie_aware += q.tie_aware / Q;
+        }
+        const RecallSummary rsum = summarize_recall(per_query);
 
         // ------------------------------------------------------------------------------------------
         // Agregados, impressao e CSVs
@@ -180,6 +190,8 @@ int main(int argc, char** argv) {
         const double speedup = opt.baseline_s > 0 ? opt.baseline_s / search_mean : NAN;
         const double efficiency = opt.baseline_s > 0 ? speedup / T : NAN;
         const double cpu_util = cpu_mean / (search_mean * T);
+        // Banda efetiva: cada query le a base inteira (n * d floats) — compara com o teto medido pelo membw.
+        const double effective_gbps = double(n) * d * sizeof(float) * Q / search_mean / 1e9;
 
         const std::string run_id = timestamp_id() + "_" + (opt.sequential ? "seq" : "t" + std::to_string(T));
         const std::string run_dir = unique_run_dir(opt.out_dir + "/" + run_id);
@@ -189,6 +201,7 @@ int main(int argc, char** argv) {
                     search_mean * 1e3 / Q, Q / search_mean);
         std::printf("  recall@%d = %.4f (considerando empates de distancia) | %.4f (estrito, por id)\n", k,
                     recall.tie_aware, recall.strict);
+        std::printf("  banda efetiva: %.1f GB/s (base inteira lida por query)\n", effective_gbps);
         // CPU do processo inclui o tempo em que as threads do OpenMP ficam "girando" esperando a proxima regiao
         // paralela — isso tambem gasta energia, por isso e esse o numero usado como proxy de energia.
         std::printf("  CPU: %.2f s por repeticao (%.0f%% de utilizacao media das %d threads)\n", cpu_mean,
@@ -227,21 +240,32 @@ int main(int argc, char** argv) {
         }
 
         CsvTable summary_csv({"run_id", "repeat", "search_s", "merge_s", "ms_per_query", "cpu_s", "cpu_util_pct",
-                              "energy_j", "invol_ctx_switches", "vol_ctx_switches", "minor_faults"});
+                              "energy_j", "invol_ctx_switches", "vol_ctx_switches", "minor_faults",
+                              "search_start_unix", "search_end_unix"});
         for (size_t r = 0; r < reps.size(); r++) {
             const RepeatResult& rr = reps[r];
             summary_csv.add_row({run_id, std::to_string(r + 1), fmt(rr.search_s), fmt(rr.merge_s),
                                  fmt(rr.search_s * 1e3 / Q, 4), fmt(rr.cpu_s), fmt(100 * rr.cpu_s / (rr.search_s * T), 1),
                                  fmt_or_na(rr.energy_j, 3), std::to_string(rr.usage_delta.invol_ctx_switches),
                                  std::to_string(rr.usage_delta.vol_ctx_switches),
-                                 std::to_string(rr.usage_delta.minor_faults)});
+                                 std::to_string(rr.usage_delta.minor_faults), fmt(rr.start_unix, 3),
+                                 fmt(rr.end_unix, 3)});
         }
+
+        // Por query (resultado da ultima repeticao — a busca e deterministica, todas dao o mesmo).
+        CsvTable queries_csv({"run_id", "query", "recall_at_k", "recall_at_k_strict", "dist_ratio_mean",
+                              "dist_ratio_kth"});
+        for (int q = 0; q < Q; q++)
+            queries_csv.add_row({run_id, std::to_string(q), fmt(per_query[q].tie_aware, 4),
+                                 fmt(per_query[q].strict, 4), fmt_or_na(per_query[q].ratio_mean, 6),
+                                 fmt_or_na(per_query[q].ratio_kth, 6)});
 
         CsvTable runs_csv({"run_id", "timestamp", "host", "cpu_model", "algorithm", "dataset", "threads", "n_base", "d",
                            "queries", "k", "repeats", "search_s_mean", "search_s_std", "search_s_min", "ms_per_query",
                            "queries_per_s", "merge_s_mean", "recall_at_k", "recall_at_k_strict", "cpu_s_mean", "cpu_util_pct", "energy_j_mean",
                            "avg_power_w", "energy_mj_per_query", "baseline_s", "speedup", "efficiency",
-                           "max_rss_mb", "omp_proc_bind", "omp_places"});
+                           "max_rss_mb", "omp_proc_bind", "omp_places", "effective_gbps", "recall_min_query",
+                           "queries_perfect_pct", "dist_ratio_mean", "dist_ratio_kth_max"});
         runs_csv.add_row({run_id, timestamp_iso(), hostname(), cpu_model(), algorithm, h.dataset, std::to_string(T),
                           std::to_string(n), std::to_string(d), std::to_string(Q), std::to_string(k),
                           std::to_string(opt.repeats), fmt(search_mean), fmt(stddev(search)),
@@ -251,10 +275,13 @@ int main(int argc, char** argv) {
                           fmt_or_na(energy_mean / search_mean, 3), fmt_or_na(energy_mean * 1e3 / Q, 4),
                           opt.baseline_s > 0 ? fmt(opt.baseline_s) : "NA", fmt_or_na(speedup, 3),
                           fmt_or_na(efficiency, 3), fmt(reps.back().usage_delta.max_rss_kb / 1024.0, 1),
-                          env_or("OMP_PROC_BIND", "unset"), env_or("OMP_PLACES", "unset")});
+                          env_or("OMP_PROC_BIND", "unset"), env_or("OMP_PLACES", "unset"), fmt(effective_gbps, 2),
+                          fmt(rsum.min_tie_aware, 4), fmt(rsum.perfect_pct, 2), fmt_or_na(rsum.ratio_mean, 6),
+                          fmt_or_na(rsum.ratio_kth_max, 6)});
 
         summary_csv.write(run_dir + "/summary.csv");
         threads_csv.write(run_dir + "/threads.csv");
+        queries_csv.write(run_dir + "/queries.csv");
         runs_csv.write(run_dir + "/run.csv");
         runs_csv.append(opt.out_dir + "/runs.csv");
         std::printf("\n  CSVs gravados em %s/ (e uma linha em %s/runs.csv)\n", run_dir.c_str(), opt.out_dir.c_str());

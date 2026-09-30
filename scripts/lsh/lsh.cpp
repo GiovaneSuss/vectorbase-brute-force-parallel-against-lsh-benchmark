@@ -218,11 +218,15 @@ int64_t lsh_query(const LSHFamily& fam, const std::vector<LSHIndex>& index, cons
 }
 
 void lsh_search_sequential(const LSHFamily& fam, const std::vector<LSHIndex>& index, const float* base, int n, int d,
-                           const float* queries, int Q, int k, Neighbor* out, LshThreadStats& s) {
+                           const float* queries, int Q, int k, Neighbor* out, LshThreadStats& s,
+                           int64_t* candidates) {
     const double w0 = wall_time(), c0 = thread_cpu_time();
     QueryScratch cand(n);
-    for (int q = 0; q < Q; q++)
-        s.candidates += lsh_query(fam, index, base, d, queries + size_t(q) * d, k, cand, out + size_t(q) * k);
+    for (int q = 0; q < Q; q++) {
+        const int64_t c = lsh_query(fam, index, base, d, queries + size_t(q) * d, k, cand, out + size_t(q) * k);
+        s.candidates += c;
+        if (candidates) candidates[q] = c;
+    }
     s.queries += Q;
     s.search_s += wall_time() - w0;
     s.search_cpu_s += thread_cpu_time() - c0;
@@ -231,7 +235,7 @@ void lsh_search_sequential(const LSHFamily& fam, const std::vector<LSHIndex>& in
 
 void lsh_search_parallel(const LSHFamily& fam, const std::vector<LSHIndex>& index, const float* base, int n, int d,
                          const float* queries, int Q, int k, int threads, int batch, Neighbor* out,
-                         LshThreadStats* stats) {
+                         LshThreadStats* stats, int64_t* candidates) {
 #pragma omp parallel num_threads(threads)
     {
         LshThreadStats& s = stats[omp_get_thread_num()];
@@ -243,7 +247,9 @@ void lsh_search_parallel(const LSHFamily& fam, const std::vector<LSHIndex>& inde
         // nowait: a thread que acaba sai do loop e registra o seu tempo sem esperar as outras.
 #pragma omp for schedule(dynamic, batch) nowait
         for (int q = 0; q < Q; q++) {
-            nc += lsh_query(fam, index, base, d, queries + size_t(q) * d, k, cand, out + size_t(q) * k);
+            const int64_t c = lsh_query(fam, index, base, d, queries + size_t(q) * d, k, cand, out + size_t(q) * k);
+            nc += c;
+            if (candidates) candidates[q] = c;
             nq++;
         }
         s.queries += nq;

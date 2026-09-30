@@ -48,17 +48,20 @@ o tempo de busca (que tem os mesmos nomes de coluna no `runs.csv` dos dois).
 | `SEED` | `--seed` | 42 | semente das projeções |
 | `BATCH` | `--batch` | 1 | queries por lote no schedule dynamic da busca |
 
-Calibração no SIFT1M (4 threads, 200 queries; recall@10 considerando empates):
+Calibração no SIFT1M (sequencial, 1024 queries, i5-1135G7; recall@10 considerando empates). São as
+configurações do `make experimento` (`LSH_CONFIGS`), a curva recall × velocidade:
 
 | L | K | w | recall | candidatos/query | ms/query |
 |---|---|---|---|---|---|
-| 8 | 8 | 1000 | 0.871 | 184 mil (18%) | 8.3 |
-| 16 | 10 | 1000 | 0.904 | 133 mil (13%) | 6.0 |
-| **32** | **10** | **800** | **0.927** | **82 mil (8%)** | **3.5** |
-| 32 | 12 | 1000 | 0.950 | 113 mil (11%) | 4.9 |
-| 32 | 14 | 1200 | 0.975 | 152 mil (15%) | 6.0 |
+| 8 | 8 | 1000 | 0.873 | 186 mil (19%) | 18.0 |
+| **32** | **10** | **800** | **0.915** | **84 mil (8%)** | **10.4** |
+| 32 | 12 | 1000 | 0.945 | 112 mil (11%) | 12.5 |
+| 32 | 14 | 1200 | 0.969 | 157 mil (16%) | 16.7 |
+| 40 | 14 | 1300 | 0.989 | 222 mil (22%) | 21.0 |
 
-(brute-force na mesma máquina, 4 threads: 23 ms/query.) No SIFT10M a densidade é 10x maior e os mesmos
+`16:10:1000` foi descartada (recall 0.911, pior e mais lenta que a padrão); `64:14:1400` chega a 0.999 mas
+calcula distância para 40% da base (32 ms/query, mais lento que o brute-force sequencial). Brute-force na
+mesma máquina: ~38 ms/query sequencial, ~15 ms/query no melhor número de threads. No SIFT10M a densidade é 10x maior e os mesmos
 parâmetros deixam ~5% da base como candidatos (recall 0.90, índice de ~2 GB): vale testar `LSH_HASHES=12` ou
 mais para cortar candidatos.
 
@@ -67,9 +70,10 @@ mais para cortar candidatos.
 Por execução (`results/lsh/<data-hora>_<seq|tN>/`):
 
 - `summary.csv` — por repetição: indexação (total, fase hash, fase buckets, CPU, energia) e busca (tempo,
-  ms/query, CPU, utilização, energia, trocas de contexto).
+  ms/query, CPU, utilização, energia, trocas de contexto), com horário de início/fim de cada fase.
 - `threads.csv` — por thread e repetição: faixa de vetores e tempo da fase hash, tabelas montadas e tempo da
   fase buckets, queries e candidatos processados, tempo e CPU da busca, ocupação e núcleo.
+- `queries.csv` — por query: recall, recall estrito, razão de distância (devolvido ÷ verdadeiro) e candidatos.
 - `run.csv` — uma linha agregada (parâmetros, médias/desvios, forma do índice — memória, buckets não vazios,
   maior bucket —, candidatos por query, recall, speedups e eficiências da indexação e da busca). A mesma linha
   é acrescentada em `results/lsh/runs.csv`.

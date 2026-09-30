@@ -9,6 +9,9 @@
 
 // Relogio de parede monotonico, em segundos.
 double wall_time();
+// Relogio "de calendario" (segundos desde 1970, UTC), gravado no inicio/fim de cada fase medida para cruzar
+// com logs externos de potencia (ex.: HWiNFO no Windows, quando o RAPL nao existe — WSL).
+double unix_time();
 // Tempo de CPU consumido pela thread que chama (user + sys), em segundos.
 double thread_cpu_time();
 
