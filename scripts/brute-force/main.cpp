@@ -80,33 +80,6 @@ struct RepeatResult {
     std::vector<ThreadStats> threads;
 };
 
-double mean(const std::vector<double>& v) {
-    double s = 0;
-    for (double x : v) s += x;
-    return s / v.size();
-}
-
-double stddev(const std::vector<double>& v) {
-    if (v.size() < 2) return 0;
-    double m = mean(v), s = 0;
-    for (double x : v) s += (x - m) * (x - m);
-    return std::sqrt(s / (v.size() - 1));
-}
-
-std::string fmt_or_na(double v, int precision = 6) { return std::isnan(v) ? "NA" : fmt(v, precision); }
-
-std::string env_or(const char* name, const char* fallback) {
-    const char* v = std::getenv(name);
-    return v ? v : fallback;
-}
-
-std::string unique_run_dir(const std::string& base) {
-    std::string dir = base;
-    struct stat st;
-    for (int i = 2; stat(dir.c_str(), &st) == 0; i++) dir = base + "-" + std::to_string(i);
-    return dir;
-}
-
 } // namespace
 
 int main(int argc, char** argv) {

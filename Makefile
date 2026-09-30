@@ -12,6 +12,14 @@ QUERIES ?= 100
 K ?= 10
 REPEATS ?= 3
 THREAD_LIST ?= 1 2 4 8
+# Parametros do LSH (fixos entre configuracoes: mesma semente = mesmo indice). LSH_BUCKETS=0 = automatico (~n/16)
+LSH_TABLES ?= 32
+LSH_HASHES ?= 10
+LSH_WIDTH ?= 800
+LSH_BUCKETS ?= 0
+SEED ?= 42
+# Queries por lote no schedule(dynamic) da busca LSH paralela
+BATCH ?= 1
 
 # Fixa cada thread OpenMP num nucleo (threads vizinhas em nucleos vizinhos): sem isso o SO migra as
 # threads entre nucleos no meio da medicao e o tempo fica ruidoso.
@@ -37,10 +45,18 @@ BF_HDRS := $(wildcard $(BF_DIR)/*.h $(COMMON_DIR)/*.h)
 SEARCH_DATASET := $(if $(filter command line environment,$(origin DATASET)),$(DATASET),auto)
 BF_ARGS := --dataset $(SEARCH_DATASET) --queries $(QUERIES) --k $(K) --repeats $(REPEATS) --out $(RESULTS_DIR)/brute-force
 
-.PHONY: all database download download-10m construct-db up-db down-db status-db test-db brute-force \
-        brute-force-seq bench-brute-force lsh clean
+LSH_BIN := $(BIN_DIR)/lsh
+LSH_DIR := $(SCRIPTS_DIR)/lsh
+LSH_SRCS := $(LSH_DIR)/main.cpp $(LSH_DIR)/lsh.cpp $(COMMON_DIR)/shm_db.cpp $(COMMON_DIR)/metrics.cpp
+LSH_HDRS := $(wildcard $(LSH_DIR)/*.h $(COMMON_DIR)/*.h)
+LSH_ARGS := --dataset $(SEARCH_DATASET) --queries $(QUERIES) --k $(K) --repeats $(REPEATS) \
+            --tables $(LSH_TABLES) --hashes $(LSH_HASHES) --width $(LSH_WIDTH) --buckets $(LSH_BUCKETS) \
+            --seed $(SEED) --out $(RESULTS_DIR)/lsh
 
-all: database $(BF_BIN)
+.PHONY: all database download download-10m construct-db up-db down-db status-db test-db brute-force \
+        brute-force-seq bench-brute-force lsh lsh-seq bench-lsh clean
+
+all: database $(BF_BIN) $(LSH_BIN)
 
 # Compila a ferramenta do banco (parser .fvecs/.ivecs + construcao + memoria compartilhada)
 database: $(PCD_DB)
@@ -109,9 +125,21 @@ brute-force-seq: $(BF_BIN)
 bench-brute-force: $(BF_BIN)
 	@$(BF_DIR)/bench.sh "$(BF_BIN)" "$(THREAD_LIST)" $(BF_ARGS)
 
-# Compila e roda a indexacao + busca LSH com THREADS threads
-lsh:
-	@echo "TODO: compilar e rodar $(SCRIPTS_DIR)/lsh com OMP_NUM_THREADS=$(THREADS) sobre o banco $(DATASET)"
+$(LSH_BIN): $(LSH_SRCS) $(LSH_HDRS)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(COMMON_DIR) -I$(LSH_DIR) -o $@ $(LSH_SRCS) $(LDFLAGS)
+
+# LSH paralelo com THREADS threads: indexacao (medida a parte) + busca por lotes de queries (banco no ar)
+lsh: $(LSH_BIN)
+	@$(LSH_BIN) --threads $(THREADS) --batch $(BATCH) $(LSH_ARGS)
+
+# LSH sequencial (sem OpenMP) — baseline do speedup da indexacao e da busca
+lsh-seq: $(LSH_BIN)
+	@$(LSH_BIN) --seq $(LSH_ARGS)
+
+# Roda o sequencial e depois o paralelo para cada valor de THREAD_LIST, com speedup e eficiencia
+bench-lsh: $(LSH_BIN)
+	@$(LSH_DIR)/bench.sh "$(LSH_BIN)" "$(THREAD_LIST)" --batch $(BATCH) $(LSH_ARGS)
 
 clean:
 	rm -rf $(BIN_DIR)

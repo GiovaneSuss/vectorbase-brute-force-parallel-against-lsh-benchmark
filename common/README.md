@@ -14,7 +14,8 @@ Já implementado:
 - `distance.h` — `l2_sq`: distância euclidiana ao quadrado (vetorizada com `omp simd`).
 - `topk.h` — `Neighbor`, `TopK` (max-heap limitada a k) e `merge_topk` (reduz os top-K locais no global).
 - `recall.h` — `compute_recall`: recall@k estrito e considerando empates de distância.
-- `metrics.{h,cpp}` — relógio, CPU por processo/thread, energia via RAPL, data-hora e escrita de CSV.
+- `metrics.{h,cpp}` — relógio, CPU por processo/thread, energia via RAPL, data-hora, escrita de CSV e
+  auxiliares dos experimentos (média/desvio das repetições, `fmt_or_na`, diretório único por execução).
 
 Estruturas específicas de um único algoritmo (ex.: `Bucket`, `LSHIndex` do LSH) não entram aqui — ficam em
 `scripts/lsh/`.

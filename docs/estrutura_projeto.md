@@ -27,7 +27,7 @@ parser e o banco em memória compartilhada); as buscas ainda não.
 - **`Makefile`** (raiz) — orquestra os passos: `make download`, `make construct-db`, `make up-db`,
   `make down-db`, `make status-db`, `make test-db` (todos com `DATASET=sift1m|sift10m|siftsmall`, ou os
   atalhos `-1m`/`-10m`/`-small`, ex.: `make up-db-10m`), e
-  `make brute-force THREADS=N` / `make lsh THREADS=N` (ainda placeholders `TODO`).
+  `make brute-force THREADS=N` / `make lsh THREADS=N` (+ `-seq` e `bench-` de cada um).
 
 ## Por que o banco fica num processo separado, em memória compartilhada
 

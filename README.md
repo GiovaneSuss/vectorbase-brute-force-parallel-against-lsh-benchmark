@@ -52,7 +52,16 @@ make bench-brute-force        # sequencial + 1, 2, 4 e 8 threads, com speedup e 
 Os resultados ficam em `results/brute-force/<data-hora>_<seq|tN>/` e cada execução acrescenta uma linha em
 `results/brute-force/runs.csv`.
 
-O LSH ainda não foi implementado.
+**6. Rodar o LSH** (idem; cada execução indexa e depois busca — a indexação é medida à parte):
+
+```bash
+make lsh-seq                  # sequencial (baseline da indexação e da busca)
+make lsh THREADS=4            # paralelo com 4 threads
+make bench-lsh                # sequencial + 1, 2, 4 e 8 threads, com speedup/eficiência das duas fases
+```
+
+Resultados em `results/lsh/`, no mesmo formato. Parâmetros do LSH: `LSH_TABLES=32`, `LSH_HASHES=10`,
+`LSH_WIDTH=800`, `SEED=42`, `BATCH=1` (padrões; ver `scripts/lsh/README.md` para o trade-off recall × tempo).
 
 ## Opções
 

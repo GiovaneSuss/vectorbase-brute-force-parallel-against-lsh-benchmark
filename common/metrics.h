@@ -63,4 +63,12 @@ private:
 };
 
 std::string fmt(double v, int precision = 6);
+std::string fmt_or_na(double v, int precision = 6); // "NA" se v for NAN
 void make_dirs(const std::string& path);
+// base, ou base-2, base-3... se ja existir (duas execucoes no mesmo segundo nao se sobrescrevem)
+std::string unique_run_dir(const std::string& base);
+std::string env_or(const char* name, const char* fallback);
+
+// Estatisticas das repeticoes de um experimento.
+double mean(const std::vector<double>& v);
+double stddev(const std::vector<double>& v); // desvio padrao amostral (0 com menos de 2 valores)

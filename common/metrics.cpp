@@ -1,6 +1,8 @@
 #include "metrics.h"
 
 #include <cerrno>
+#include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -181,4 +183,31 @@ void make_dirs(const std::string& path) {
         if (mkdir(cur.c_str(), 0755) != 0 && errno != EEXIST)
             throw std::runtime_error("mkdir " + cur + ": " + std::strerror(errno));
     }
+}
+
+std::string fmt_or_na(double v, int precision) { return std::isnan(v) ? "NA" : fmt(v, precision); }
+
+std::string unique_run_dir(const std::string& base) {
+    std::string dir = base;
+    struct stat st;
+    for (int i = 2; stat(dir.c_str(), &st) == 0; i++) dir = base + "-" + std::to_string(i);
+    return dir;
+}
+
+std::string env_or(const char* name, const char* fallback) {
+    const char* v = std::getenv(name);
+    return v ? v : fallback;
+}
+
+double mean(const std::vector<double>& v) {
+    double s = 0;
+    for (double x : v) s += x;
+    return s / v.size();
+}
+
+double stddev(const std::vector<double>& v) {
+    if (v.size() < 2) return 0;
+    double m = mean(v), s = 0;
+    for (double x : v) s += (x - m) * (x - m);
+    return std::sqrt(s / (v.size() - 1));
 }
